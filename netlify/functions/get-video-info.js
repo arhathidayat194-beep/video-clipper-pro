@@ -1,5 +1,3 @@
-const ytdl = require("@distube/ytdl-core");
-
 exports.handler = async (event) => {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -7,12 +5,8 @@ exports.handler = async (event) => {
     "Content-Type": "application/json",
   };
 
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: cors, body: "" };
-  }
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, headers: cors, body: JSON.stringify({ error: "Method not allowed" }) };
-  }
+  if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers: cors, body: "" };
+  if (event.httpMethod !== "POST") return { statusCode: 405, headers: cors, body: JSON.stringify({ error: "Method not allowed" }) };
 
   try {
     const { url } = JSON.parse(event.body || "{}");
@@ -20,6 +14,7 @@ exports.handler = async (event) => {
 
     const isYouTube = url.includes("youtube.com") || url.includes("youtu.be");
 
+    // Kalau bukan YouTube, langsung pakai URL-nya
     if (!isYouTube) {
       return {
         statusCode: 200,
@@ -34,35 +29,57 @@ exports.handler = async (event) => {
       };
     }
 
-    if (!ytdl.validateURL(url)) {
-      return { statusCode: 400, headers: cors, body: JSON.stringify({ error: "URL YouTube tidak valid" }) };
-    }
+    // ── Ambil judul dari YouTube oEmbed (gratis, tanpa API key) ──
+    let title = "YouTube Video";
+    try {
+      const oe = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
+      if (oe.ok) { const d = await oe.json(); title = d.title || title; }
+    } catch (_) {}
 
-    const info = await ytdl.getInfo(url, {
-      requestOptions: { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } },
+    // ── Thumbnail dari YouTube CDN ──
+    const vidMatch = url.match(/(?:v=|youtu\.be\/)([^&\n?#]{11})/);
+    const vidId    = vidMatch?.[1] || "";
+    const thumbnail = vidId ? `https://img.youtube.com/vi/${vidId}/hqdefault.jpg` : "";
+
+    // ── Cobalt API untuk dapat URL download (handle bot detection) ──
+    const cobaltRes = await fetch("https://api.cobalt.tools/", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+      body: JSON.stringify({
+        url: url,
+        videoQuality: "480",
+        filenameStyle: "basic",
+        downloadMode: "auto",
+      }),
     });
 
-    let formats = ytdl.filterFormats(info.formats, "videoandaudio");
-    if (!formats.length) formats = info.formats.filter((f) => f.hasVideo && f.hasAudio);
-    if (!formats.length) throw new Error("Tidak ada format video+audio yang tersedia");
+    if (!cobaltRes.ok) throw new Error(`Cobalt API gagal: HTTP ${cobaltRes.status}`);
 
-    formats.sort((a, b) => (parseInt(a.qualityLabel) || 0) - (parseInt(b.qualityLabel) || 0));
-    const format = formats.find((f) => parseInt(f.qualityLabel) <= 480) || formats[0];
+    const cobalt = await cobaltRes.json();
 
-    const thumbnails = info.videoDetails.thumbnails || [];
-    const thumb = thumbnails[thumbnails.length - 1]?.url || "";
+    if (cobalt.status === "error") {
+      throw new Error(`Cobalt error: ${cobalt.error?.code || JSON.stringify(cobalt.error)}`);
+    }
+
+    const downloadUrl = cobalt.url;
+    if (!downloadUrl) throw new Error("Tidak ada URL download. Coba link YouTube lain.");
 
     return {
       statusCode: 200,
       headers: cors,
       body: JSON.stringify({
-        title: info.videoDetails.title,
-        duration: parseInt(info.videoDetails.lengthSeconds),
-        thumbnail: thumb,
-        downloadUrl: format.url,
-        quality: format.qualityLabel || "Auto",
+        title,
+        duration: 0,
+        thumbnail,
+        downloadUrl,
+        quality: "480p",
       }),
     };
+
   } catch (err) {
     return {
       statusCode: 500,
