@@ -1,3 +1,17 @@
+/* ============================================================
+   get-video-info.js — menggunakan Invidious API (open source)
+   Tidak perlu API key, CORS-friendly, lebih stabil dari ytdl
+   ============================================================ */
+
+// Daftar instance Invidious publik (fallback ke berikutnya jika gagal)
+const INSTANCES = [
+  "https://inv.nadeko.net",
+  "https://yt.cdaut.de",
+  "https://invidious.privacydev.net",
+  "https://iv.melmac.space",
+  "https://invidious.nerdvpn.de",
+];
+
 exports.handler = async (event) => {
   const cors = {
     "Access-Control-Allow-Origin": "*",
@@ -6,7 +20,7 @@ exports.handler = async (event) => {
   };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers: cors, body: "" };
-  if (event.httpMethod !== "POST") return { statusCode: 405, headers: cors, body: JSON.stringify({ error: "Method not allowed" }) };
+  if (event.httpMethod !== "POST")    return { statusCode: 405, headers: cors, body: JSON.stringify({ error: "Method not allowed" }) };
 
   try {
     const { url } = JSON.parse(event.body || "{}");
@@ -14,7 +28,7 @@ exports.handler = async (event) => {
 
     const isYouTube = url.includes("youtube.com") || url.includes("youtu.be");
 
-    // Kalau bukan YouTube, langsung pakai URL-nya
+    // ── Bukan YouTube → pakai langsung ──────────────────────────
     if (!isYouTube) {
       return {
         statusCode: 200,
@@ -29,55 +43,69 @@ exports.handler = async (event) => {
       };
     }
 
-    // ── Ambil judul dari YouTube oEmbed (gratis, tanpa API key) ──
-    let title = "YouTube Video";
-    try {
-      const oe = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`);
-      if (oe.ok) { const d = await oe.json(); title = d.title || title; }
-    } catch (_) {}
+    // ── Ekstrak video ID ─────────────────────────────────────────
+    const match = url.match(/(?:v=|youtu\.be\/)([^&\n?#]{11})/);
+    if (!match) throw new Error("Tidak bisa mengambil video ID dari URL YouTube ini");
+    const videoId = match[1];
 
-    // ── Thumbnail dari YouTube CDN ──
-    const vidMatch = url.match(/(?:v=|youtu\.be\/)([^&\n?#]{11})/);
-    const vidId    = vidMatch?.[1] || "";
-    const thumbnail = vidId ? `https://img.youtube.com/vi/${vidId}/hqdefault.jpg` : "";
+    // ── Coba tiap Invidious instance ─────────────────────────────
+    let result = null;
+    let lastErr = "";
 
-    // ── Cobalt API untuk dapat URL download (handle bot detection) ──
-    const cobaltRes = await fetch("https://api.cobalt.tools/", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-      body: JSON.stringify({
-        url: url,
-        videoQuality: "480",
-        filenameStyle: "basic",
-        downloadMode: "auto",
-      }),
-    });
+    for (const instance of INSTANCES) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
 
-    if (!cobaltRes.ok) throw new Error(`Cobalt API gagal: HTTP ${cobaltRes.status}`);
+        const resp = await fetch(
+          `${instance}/api/v1/videos/${videoId}?fields=title,lengthSeconds,formatStreams,videoThumbnails`,
+          { signal: controller.signal, headers: { "User-Agent": "Mozilla/5.0" } }
+        );
+        clearTimeout(timer);
 
-    const cobalt = await cobaltRes.json();
+        if (!resp.ok) { lastErr = `${instance} → HTTP ${resp.status}`; continue; }
 
-    if (cobalt.status === "error") {
-      throw new Error(`Cobalt error: ${cobalt.error?.code || JSON.stringify(cobalt.error)}`);
+        const data = await resp.json();
+        if (data.error) { lastErr = `${instance} → ${data.error}`; continue; }
+
+        // formatStreams = video+audio muxed (itag 18=360p, 22=720p, dll)
+        const formats = (data.formatStreams || []).filter(f => f.container === "mp4");
+        if (!formats.length) { lastErr = `${instance} → Tidak ada format MP4`; continue; }
+
+        // Pilih kualitas terbaik ≤ 480p agar cepat diproses FFmpeg.wasm
+        const fmt = formats.find(f => f.qualityLabel === "360p")
+                  || formats.find(f => f.qualityLabel === "480p")
+                  || formats[0];
+
+        // ⭐ Proxy melalui Invidious agar browser bisa download (CORS OK)
+        const proxyUrl = `${instance}/latest_version?id=${videoId}&itag=${fmt.itag}&local=true`;
+
+        const thumb = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+
+        result = {
+          title: data.title || "YouTube Video",
+          duration: parseInt(data.lengthSeconds) || 0,
+          thumbnail: thumb,
+          downloadUrl: proxyUrl,
+          quality: fmt.qualityLabel || "360p",
+          instance: instance,
+        };
+        break; // berhasil → hentikan loop
+
+      } catch (e) {
+        lastErr = `${instance} → ${e.message}`;
+        continue;
+      }
     }
 
-    const downloadUrl = cobalt.url;
-    if (!downloadUrl) throw new Error("Tidak ada URL download. Coba link YouTube lain.");
+    if (!result) {
+      throw new Error(`Semua server gagal. Coba lagi atau gunakan link MP4 langsung.\nDetail: ${lastErr}`);
+    }
 
     return {
       statusCode: 200,
       headers: cors,
-      body: JSON.stringify({
-        title,
-        duration: 0,
-        thumbnail,
-        downloadUrl,
-        quality: "480p",
-      }),
+      body: JSON.stringify(result),
     };
 
   } catch (err) {
