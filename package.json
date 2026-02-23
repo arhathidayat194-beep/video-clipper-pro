@@ -1,0 +1,12 @@
+{
+  "name": "video-clipper-pro",
+  "version": "1.0.0",
+  "description": "Online Video Clipper Pro - Free & Browser-based",
+  "dependencies": {
+    "@distube/ytdl-core": "^4.14.4",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
