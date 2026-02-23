@@ -3,10 +3,6 @@
   functions = "netlify/functions"
   command = "npm install"
 
-# Tambah timeout agar Invidious punya cukup waktu merespons
-[functions."get-video-info"]
-  timeout = 20
-
 [[headers]]
   for = "/*"
   [headers.values]

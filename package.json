@@ -1,8 +1,5 @@
 {
   "name": "video-clipper-pro",
   "version": "1.0.0",
-  "description": "Online Video Clipper Pro - Free & Browser-based",
-  "engines": {
-    "node": ">=18"
-  }
+  "engines": { "node": ">=18" }
 }
